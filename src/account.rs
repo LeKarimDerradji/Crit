@@ -1,5 +1,6 @@
-use crate::wallet::Wallet;
+/*
 use crate::currency::Crit;
+use crate::wallet::Wallet;
 
 pub type AccountId = u64;
 
@@ -13,13 +14,16 @@ pub enum AccountError {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Account {
-    pub nonce: AccountId,
+    pub nonce: u64,
     wallet: Wallet,
 }
 
 impl Account {
     pub fn increment_nonce(&mut self) -> Result<(), AccountError> {
-        self.nonce = self.nonce.checked_add(1).ok_or(AccountError::NonceOverflow)?;
+        self.nonce = self
+            .nonce
+            .checked_add(1)
+            .ok_or(AccountError::NonceOverflow)?;
         Ok(())
     }
 
@@ -43,3 +47,4 @@ impl Account {
         Ok(())
     }
 }
+*/
