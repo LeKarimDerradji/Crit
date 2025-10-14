@@ -37,10 +37,34 @@ pub struct Wallet {
     /// Amount currently staked.
     staked: Crit,
     /// Rewards accrued but not yet transferred to the spendable balance.
-   reward: Crit,
+    reward: Crit,
 }
 
 impl Wallet {
+    /// Creates a wallet initialized with zero balances.
+    pub fn new() -> Self {
+        Self {
+            available: Crit::ZERO,
+            staked: Crit::ZERO,
+            reward: Crit::ZERO,
+        }
+    }
+
+    /// Returns the spendable balance.
+    pub fn available_balance(&self) -> Crit {
+        self.available
+    }
+
+    /// Returns the staked balance.
+    pub fn staked_balance(&self) -> Crit {
+        self.staked
+    }
+
+    /// Returns the reward balance.
+    pub fn reward_balance(&self) -> Crit {
+        self.reward
+    }
+
     /// Adds funds to the available balance, guarding against overflow.
     pub fn credit_available(&mut self, amount: Crit) -> Result<(), WalletError> {
         self.available
