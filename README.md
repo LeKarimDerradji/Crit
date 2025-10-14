@@ -1,0 +1,1 @@
+Minimalist decentralized cash system.
