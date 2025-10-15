@@ -1,5 +1,6 @@
 //! Currency domain primitives: safe arithmetic around the Crit denomination.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use thiserror::Error;
 
 /// Error variants emitted when [`Crit`] arithmetic guards fire.
@@ -12,7 +13,7 @@ pub enum CurrencyError {
 }
 
 /// Fixed-precision currency amount used throughout the crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, BorshSerialize, BorshDeserialize)]
 pub struct Crit(u128);
 
 impl Crit {
