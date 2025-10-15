@@ -66,6 +66,8 @@ pub enum TxError {
     MismatchedSigner,
     #[error("fee computation overflowed")]
     Fee(CurrencyError),
+    #[error("failed to encode transaction")]
+    Encode,
     #[error("failed to decode transaction")]
     Decode,
 }
@@ -118,7 +120,7 @@ impl Tx {
 
     /// Serializes the transaction (including signature) using Borsh.
     pub fn to_bytes(&self) -> Result<Vec<u8>, TxError> {
-        to_vec(self).map_err(|_| TxError::Decode)
+        to_vec(self).map_err(|_| TxError::Encode)
     }
 
     /// Deserializes a transaction from Borsh bytes.
@@ -162,14 +164,12 @@ mod tests {
     }
 
     #[test]
-    fn serialization_round_trip_preserves_fields() {
+    fn serialization_round_trip_unstake() {
         let (account_id, signing_key) = Account::generate_account_keys();
         let tx = Tx::new(
             account_id,
             99,
-            TxKind::Unstake {
-                amount: Crit::from_units(123_456),
-            },
+            TxKind::unstake(Crit::from_units(123_456)),
         )
         .sign(&signing_key)
         .expect("sign");
@@ -182,6 +182,53 @@ mod tests {
         assert!(matches!(decoded.kind, TxKind::Unstake { amount } if amount.units() == 123_456));
         assert_eq!(decoded.signature, tx.signature);
         assert!(decoded.verify_signature().is_ok());
+    }
+
+    #[test]
+    fn serialization_round_trip_transfer_variant() {
+        let (from, signing_key) = Account::generate_account_keys();
+        let (to, _) = Account::generate_account_keys();
+        let tx = Tx::new(
+            from,
+            7,
+            TxKind::transfer(&to, Crit::from_units(2_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        let bytes = tx.to_bytes().expect("serialize");
+        let decoded = Tx::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(decoded.from, tx.from);
+        assert_eq!(decoded.nonce, tx.nonce);
+        assert_eq!(decoded.kind, TxKind::transfer(&to, Crit::from_units(2_000)));
+        assert_eq!(decoded.signature, tx.signature);
+        assert!(decoded.verify_signature().is_ok());
+    }
+
+    #[test]
+    fn serialization_round_trip_stake_variant() {
+        let (from, _) = Account::generate_account_keys();
+        let tx = Tx::new(from, 11, TxKind::stake(Crit::from_units(42_000)));
+
+        let bytes = tx.to_bytes().expect("serialize");
+        let decoded = Tx::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(decoded.from, tx.from);
+        assert_eq!(decoded.nonce, tx.nonce);
+        assert_eq!(decoded.kind, TxKind::stake(Crit::from_units(42_000)));
+        assert_eq!(decoded.signature, tx.signature);
+    }
+
+    #[test]
+    fn serialization_round_trip_claim_variant() {
+        let (from, _) = Account::generate_account_keys();
+        let tx = Tx::new(from, 5, TxKind::claim_reward(Crit::from_units(77_777)));
+
+        let bytes = tx.to_bytes().expect("serialize");
+        let decoded = Tx::from_bytes(&bytes).expect("deserialize");
+
+        assert_eq!(decoded.kind, TxKind::claim_reward(Crit::from_units(77_777)));
     }
 
     #[test]
@@ -217,6 +264,19 @@ mod tests {
         assert!(matches!(
             Tx::new(other_id, 1, TxKind::Unstake { amount: Crit::ONE }).verify_signature(),
             Err(TxError::MissingSignature)
+        ));
+    }
+
+    #[test]
+    fn verify_signature_fails_with_invalid_public_key_bytes() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let mut tx = Tx::new(account_id, 0, TxKind::stake(Crit::ONE))
+            .sign(&signing_key)
+            .expect("sign");
+        tx.from = [0u8; PUBKEY_BYTES];
+        assert!(matches!(
+            tx.verify_signature(),
+            Err(TxError::Decode | TxError::InvalidSignature)
         ));
     }
 
