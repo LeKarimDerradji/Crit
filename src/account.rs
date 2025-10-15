@@ -5,11 +5,13 @@
 
 use thiserror::Error;
 
+use crate::crypto;
 use crate::currency::Crit;
 use crate::wallet::{Wallet, WalletError};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 
 /// Alias representing an external account identifier.
-pub type AccountId = u64;
+pub type AccountId = VerifyingKey;
 
 /// Errors that can arise while mutating an account.
 #[derive(Debug, Error)]
@@ -32,6 +34,12 @@ pub struct Account {
 }
 
 impl Account {
+    /// Generates a fresh account identity returning the public identifier and signing key.
+    pub fn generate_account_keys() -> (AccountId, SigningKey) {
+        let (public, private) = crypto::generate_keypair();
+        (public, private)
+    }
+
     /// Bumps the nonce by one, ensuring it never wraps.
     pub fn increment_nonce(&mut self) -> Result<(), AccountError> {
         self.nonce = self.next_nonce()?;
@@ -88,6 +96,7 @@ impl Account {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, Verifier};
 
     fn new_account() -> Account {
         Account {
@@ -269,5 +278,21 @@ mod tests {
             Err(AccountError::Wallet(WalletError::InsufficientReward))
         ));
         assert_eq!(account.nonce, 1);
+    }
+
+    #[test]
+    fn generate_account_keys_produces_unique_identity() {
+        let (id1, sk1) = Account::generate_account_keys();
+        let (id2, sk2) = Account::generate_account_keys();
+        assert_ne!(id1.to_bytes(), id2.to_bytes(), "public identifiers should differ");
+        assert_ne!(sk1.to_bytes(), sk2.to_bytes(), "signing keys should differ");
+
+        let message = b"crit account identity test";
+        let signature = sk1.sign(message);
+        id1.verify(message, &signature).expect("signature must verify with matching key");
+        assert!(
+            id2.verify(message, &signature).is_err(),
+            "signature should not verify with a different identifier"
+        );
     }
 }
