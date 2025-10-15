@@ -93,9 +93,7 @@ impl Crit {
 
         let mut fee_units = numerator / Self::FEE_DENOMINATOR;
         if numerator % Self::FEE_DENOMINATOR != 0 {
-            fee_units = fee_units
-                .checked_add(1)
-                .ok_or(CurrencyError::Overflow)?;
+            fee_units = fee_units.checked_add(1).ok_or(CurrencyError::Overflow)?;
         }
 
         if fee_units < Self::MIN_FEE_UNITS {

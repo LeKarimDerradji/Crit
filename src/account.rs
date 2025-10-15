@@ -1,5 +1,5 @@
 //! Account domain objects: combine a deterministic nonce with wallet balances.
-//! 
+//!
 //! Account identifiers are expected to live outside of this structure (e.g. as
 //! keys in a state map backed by addresses or public keys).
 
@@ -47,9 +47,7 @@ impl Account {
     }
 
     fn next_nonce(&self) -> Result<u64, AccountError> {
-        self.nonce
-            .checked_add(1)
-            .ok_or(AccountError::NonceOverflow)
+        self.nonce.checked_add(1).ok_or(AccountError::NonceOverflow)
     }
 
     fn apply_with_nonce<F>(&mut self, op: F) -> Result<(), AccountError>
@@ -116,7 +114,9 @@ mod tests {
     #[test]
     fn increment_nonce_advances_by_one() {
         let mut account = new_account();
-        account.increment_nonce().expect("nonce increment should succeed");
+        account
+            .increment_nonce()
+            .expect("nonce increment should succeed");
         assert_eq!(account.nonce, 1);
     }
 
@@ -131,7 +131,9 @@ mod tests {
     #[test]
     fn deposit_updates_balance_and_nonce() {
         let mut account = new_account();
-        account.deposit(10u128.into()).expect("deposit should succeed");
+        account
+            .deposit(10u128.into())
+            .expect("deposit should succeed");
         assert_eq!(account.nonce, 1);
         assert_eq!(balances(&account), (10, 0, 0));
     }
@@ -154,7 +156,9 @@ mod tests {
     #[test]
     fn withdraw_success_increments_nonce() {
         let mut account = new_account();
-        account.deposit(8u128.into()).expect("deposit should succeed");
+        account
+            .deposit(8u128.into())
+            .expect("deposit should succeed");
         account
             .withdraw(5u128.into())
             .expect("withdraw should succeed");
@@ -165,7 +169,9 @@ mod tests {
     #[test]
     fn withdraw_requires_sufficient_funds_without_nonce_increment() {
         let mut account = new_account();
-        account.deposit(3u128.into()).expect("deposit should succeed");
+        account
+            .deposit(3u128.into())
+            .expect("deposit should succeed");
         let result = account.withdraw(4u128.into());
         assert!(matches!(
             result,
@@ -177,7 +183,9 @@ mod tests {
     #[test]
     fn stake_moves_balance_and_increments_nonce() {
         let mut account = new_account();
-        account.deposit(10u128.into()).expect("deposit should succeed");
+        account
+            .deposit(10u128.into())
+            .expect("deposit should succeed");
         account.stake(4u128.into()).expect("stake should succeed");
         assert_eq!(account.nonce, 2);
         assert_eq!(balances(&account), (6, 4, 0));
@@ -221,7 +229,9 @@ mod tests {
     #[test]
     fn unstake_returns_funds_and_increments_nonce() {
         let mut account = new_account();
-        account.deposit(10u128.into()).expect("deposit should succeed");
+        account
+            .deposit(10u128.into())
+            .expect("deposit should succeed");
         account.stake(6u128.into()).expect("stake should succeed");
         account
             .unstake(4u128.into())
@@ -233,7 +243,9 @@ mod tests {
     #[test]
     fn unstake_failure_preserves_nonce() {
         let mut account = new_account();
-        account.deposit(2u128.into()).expect("deposit should succeed");
+        account
+            .deposit(2u128.into())
+            .expect("deposit should succeed");
         account.stake(2u128.into()).expect("stake should succeed");
         let result = account.unstake(3u128.into());
         assert!(matches!(
@@ -284,12 +296,17 @@ mod tests {
     fn generate_account_keys_produces_unique_identity() {
         let (id1, sk1) = Account::generate_account_keys();
         let (id2, sk2) = Account::generate_account_keys();
-        assert_ne!(id1.to_bytes(), id2.to_bytes(), "public identifiers should differ");
+        assert_ne!(
+            id1.to_bytes(),
+            id2.to_bytes(),
+            "public identifiers should differ"
+        );
         assert_ne!(sk1.to_bytes(), sk2.to_bytes(), "signing keys should differ");
 
         let message = b"crit account identity test";
         let signature = sk1.sign(message);
-        id1.verify(message, &signature).expect("signature must verify with matching key");
+        id1.verify(message, &signature)
+            .expect("signature must verify with matching key");
         assert!(
             id2.verify(message, &signature).is_err(),
             "signature should not verify with a different identifier"

@@ -67,12 +67,10 @@ impl Wallet {
 
     /// Adds funds to the available balance, guarding against overflow.
     pub fn credit_available(&mut self, amount: Crit) -> Result<(), WalletError> {
-        self.available
-            .add_assign(amount)
-            .map_err(|e| match e {
-                CurrencyError::Overflow => WalletError::AvailableOverflow,
-                other => WalletError::Currency(other),
-            })?;
+        self.available.add_assign(amount).map_err(|e| match e {
+            CurrencyError::Overflow => WalletError::AvailableOverflow,
+            other => WalletError::Currency(other),
+        })?;
         Ok(())
     }
 
@@ -94,13 +92,10 @@ impl Wallet {
                 CurrencyError::Underflow => WalletError::InsufficientAvailable,
                 other => WalletError::Currency(other),
             })?;
-        let new_staked = self
-            .staked
-            .checked_add(amount)
-            .map_err(|err| match err {
-                CurrencyError::Overflow => WalletError::StakedOverflow,
-                other => WalletError::Currency(other),
-            })?;
+        let new_staked = self.staked.checked_add(amount).map_err(|err| match err {
+            CurrencyError::Overflow => WalletError::StakedOverflow,
+            other => WalletError::Currency(other),
+        })?;
         self.available = new_available;
         self.staked = new_staked;
         Ok(())
@@ -108,13 +103,10 @@ impl Wallet {
 
     /// Moves funds from staked back into the available balance.
     pub fn debit_staked(&mut self, amount: Crit) -> Result<(), WalletError> {
-        let new_staked = self
-            .staked
-            .checked_sub(amount)
-            .map_err(|err| match err {
-                CurrencyError::Underflow => WalletError::InsufficientStaked,
-                other => WalletError::Currency(other),
-            })?;
+        let new_staked = self.staked.checked_sub(amount).map_err(|err| match err {
+            CurrencyError::Underflow => WalletError::InsufficientStaked,
+            other => WalletError::Currency(other),
+        })?;
         let new_available = self
             .available
             .checked_add(amount)
@@ -129,24 +121,19 @@ impl Wallet {
 
     /// Credits the reward balance.
     pub fn credit_reward(&mut self, amount: Crit) -> Result<(), WalletError> {
-        self.reward
-            .add_assign(amount)
-            .map_err(|err| match err {
-                CurrencyError::Overflow => WalletError::RewardOverflow,
-                other => WalletError::Currency(other),
-            })?;
+        self.reward.add_assign(amount).map_err(|err| match err {
+            CurrencyError::Overflow => WalletError::RewardOverflow,
+            other => WalletError::Currency(other),
+        })?;
         Ok(())
     }
 
     /// Converts a portion of the reward balance into available funds.
     pub fn debit_reward(&mut self, amount: Crit) -> Result<(), WalletError> {
-        let new_reward = self
-            .reward
-            .checked_sub(amount)
-            .map_err(|err| match err {
-                CurrencyError::Underflow => WalletError::InsufficientReward,
-                other => WalletError::Currency(other),
-            })?;
+        let new_reward = self.reward.checked_sub(amount).map_err(|err| match err {
+            CurrencyError::Underflow => WalletError::InsufficientReward,
+            other => WalletError::Currency(other),
+        })?;
         let new_available = self
             .available
             .checked_add(amount)

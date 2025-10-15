@@ -21,6 +21,9 @@ mod tests {
         let mut rng = crypto_rng();
         let first = rng.next_u64();
         let second = rng.next_u64();
-        assert_ne!(first, second, "OsRng should provide non-repeating draws with high probability");
+        assert_ne!(
+            first, second,
+            "OsRng should provide non-repeating draws with high probability"
+        );
     }
 }

@@ -26,8 +26,16 @@ mod tests {
     fn generate_keypair_produces_unique_keys() {
         let (pub1, sec1) = generate_keypair();
         let (pub2, sec2) = generate_keypair();
-        assert_ne!(pub1.to_bytes(), pub2.to_bytes(), "public keys should differ");
-        assert_ne!(sec1.to_bytes(), sec2.to_bytes(), "secret keys should differ");
+        assert_ne!(
+            pub1.to_bytes(),
+            pub2.to_bytes(),
+            "public keys should differ"
+        );
+        assert_ne!(
+            sec1.to_bytes(),
+            sec2.to_bytes(),
+            "secret keys should differ"
+        );
     }
 
     #[test]
@@ -36,7 +44,9 @@ mod tests {
         let message = b"crit signing test";
 
         let signature = private.sign(message);
-        public.verify(message, &signature).expect("signature should verify");
+        public
+            .verify(message, &signature)
+            .expect("signature should verify");
     }
 
     #[test]
@@ -44,9 +54,10 @@ mod tests {
         let (public, private) = generate_keypair();
         let signature = private.sign(b"original message");
 
-        assert!(public
-            .verify(b"tampered message", &signature)
-            .is_err(), "verification should fail on modified message");
+        assert!(
+            public.verify(b"tampered message", &signature).is_err(),
+            "verification should fail on modified message"
+        );
     }
 
     #[test]
