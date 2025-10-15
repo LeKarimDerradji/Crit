@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 /// Error variants emitted when [`Crit`] arithmetic guards fire.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum CurrencyError {
     #[error("Overflow on currency arithmetics")]
     Overflow,
@@ -20,9 +20,27 @@ impl Crit {
     pub const NAME: &'static str = "CRIT";
     /// Zero-value constant for convenience.
     pub const ZERO: Self = Self(0);
-
     /// Number of decimal places used when formatting amounts.
     pub const DECIMAL: u8 = 8;
+    /// Scaling factor (1 CRIT = 10^DECIMAL internal units).
+    pub const UNIT: u128 = 10u128.pow(Self::DECIMAL as u32);
+
+    const FEE_NUMERATOR: u128 = 1; // 0.1% = 1 / 1_000
+    const FEE_DENOMINATOR: u128 = 1_000;
+    const MIN_FEE_UNITS: u128 = 1;
+
+    /// Represents exactly 1 CRIT.
+    pub const ONE: Self = Self(Self::UNIT);
+
+    /// Builds an amount directly from internal units.
+    pub const fn from_units(units: u128) -> Self {
+        Self(units)
+    }
+
+    /// Exposes the raw centcrit value.
+    pub const fn units(self) -> u128 {
+        self.0
+    }
 
     /// Adds `amount`, returning the new value or an overflow error.
     pub(crate) fn checked_add(&self, amount: Self) -> Result<Self, CurrencyError> {
@@ -57,6 +75,34 @@ impl Crit {
             .ok_or(CurrencyError::Underflow)?;
         Ok(())
     }
+
+    /// Computes the protocol fee (0.1%) for a transaction amount.
+    ///
+    /// The fee is calculated entirely in internal units, rounded up to the next
+    /// centcrit and clamped to a minimum of one centcrit for non-zero amounts.
+    pub fn compute_fee(amount: Self) -> Result<Self, CurrencyError> {
+        if amount == Self::ZERO {
+            return Ok(Self::ZERO);
+        }
+
+        let numerator = amount
+            .0
+            .checked_mul(Self::FEE_NUMERATOR)
+            .ok_or(CurrencyError::Overflow)?;
+
+        let mut fee_units = numerator / Self::FEE_DENOMINATOR;
+        if numerator % Self::FEE_DENOMINATOR != 0 {
+            fee_units = fee_units
+                .checked_add(1)
+                .ok_or(CurrencyError::Overflow)?;
+        }
+
+        if fee_units < Self::MIN_FEE_UNITS {
+            fee_units = Self::MIN_FEE_UNITS;
+        }
+
+        Ok(Self(fee_units))
+    }
 }
 
 impl From<u128> for Crit {
@@ -75,12 +121,12 @@ impl From<Crit> for u128 {
 mod tests {
     use super::*;
 
-
     #[test]
     fn constants_are_correct() {
         assert_eq!(u128::from(Crit::ZERO), 0);
         assert_eq!(Crit::NAME, "CRIT");
         assert_eq!(Crit::DECIMAL, 8);
+        assert_eq!(Crit::UNIT, 100_000_000);
     }
 
     #[test]
@@ -133,11 +179,7 @@ mod tests {
         let mut value = Crit::from(u128::MAX);
         let result = value.add_assign(Crit::from(1));
         assert!(matches!(result, Err(CurrencyError::Overflow)));
-        assert_eq!(
-            u128::from(value),
-            u128::MAX,
-            "value must remain unchanged"
-        );
+        assert_eq!(u128::from(value), u128::MAX, "value must remain unchanged");
     }
 
     #[test]
@@ -163,5 +205,28 @@ mod tests {
 
         let back: u128 = crit_value.into();
         assert_eq!(back, original);
+    }
+
+    #[test]
+    fn compute_fee_handles_zero_amount() {
+        assert_eq!(Crit::compute_fee(Crit::ZERO).unwrap(), Crit::ZERO);
+    }
+
+    #[test]
+    fn compute_fee_applies_fraction_and_rounding() {
+        let amount = Crit::from(Crit::UNIT); // 1 CRIT
+        let fee = Crit::compute_fee(amount).expect("fee should compute");
+        assert_eq!(u128::from(fee), 100_000); // 0.001 CRIT
+
+        let amount = Crit::from(250_000_000); // 2.5 CRIT
+        let fee = Crit::compute_fee(amount).expect("fee should compute");
+        assert_eq!(u128::from(fee), 250_000);
+    }
+
+    #[test]
+    fn compute_fee_applies_minimum_floor() {
+        let tiny = Crit::from(1);
+        let fee = Crit::compute_fee(tiny).expect("fee should compute");
+        assert_eq!(u128::from(fee), 1);
     }
 }
