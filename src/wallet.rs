@@ -30,7 +30,7 @@ pub enum WalletError {
 }
 
 /// Tracks the available, staked, and reward balances for a single account.
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct Wallet {
     /// Spendable balance.
     available: Crit,
