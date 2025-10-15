@@ -12,7 +12,7 @@ pub enum CurrencyError {
 }
 
 /// Fixed-precision currency amount used throughout the crate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Crit(u128);
 
 impl Crit {
