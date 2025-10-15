@@ -228,4 +228,12 @@ mod tests {
         let fee = Crit::compute_fee(tiny).expect("fee should compute");
         assert_eq!(u128::from(fee), 1);
     }
+
+    #[test]
+    fn serialization_round_trip() {
+        let amount = Crit::from(42); // 42 centcrit
+        let encoded = borsh::to_vec(&amount).expect("serialize");
+        let decoded: Crit = borsh::from_slice(&encoded).expect("deserialize");
+        assert_eq!(amount, decoded);
+    }
 }
