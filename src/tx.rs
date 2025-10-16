@@ -1,15 +1,19 @@
-//! Transaction primitives for Crit: encoding, signing, verification and fee handling.
+//! Transaction primitives for Crit: encoding, signing, verification, fee handling, and identifiers.
 //!
 //! A transaction transports a payload [`TxKind`], a monotonically increasing
 //! nonce, the sender public key and, once prepared, an Ed25519 signature. The
 //! types exposed here derive [`BorshSerialize`]/[`BorshDeserialize`] so they can
 //! be persisted and included in checkpoints with Merkle proofs. Signing targets
-//! the Borsh encoding of `(from, nonce, kind)` to avoid circular dependencies
-//! on the signature field.
+//! the Borsh encoding of `(from, nonce, kind)`, hashed with BLAKE3 to produce a
+//! fixed-size digest before the Ed25519 signature is computed, avoiding
+//! circular dependencies on the signature field. Transaction identifiers are derived by hashing the
+//! Borsh serialization (including the optional signature) with BLAKE3 via
+//! [`Tx::tx_id`], yielding the canonical [`TxId`].
 
 use crate::account::AccountId;
 use crate::currency::{Crit, CurrencyError};
-use borsh::{BorshDeserialize, BorshSerialize, to_vec};
+use borsh::{to_vec, BorshDeserialize, BorshSerialize};
+use blake3::{hash, Hash as TxId};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use thiserror::Error;
 
@@ -120,8 +124,8 @@ impl Tx {
         if signing_key.verifying_key().to_bytes() != self.from {
             return Err(TxError::MismatchedSigner);
         }
-        let message = self.message();
-        let signature = signing_key.sign(&message);
+        let digest = self.signing_digest()?;
+        let signature = signing_key.sign(&digest);
         self.signature = Some(signature.to_bytes());
         Ok(self)
     }
@@ -131,8 +135,9 @@ impl Tx {
         let signature_bytes = self.signature.ok_or(TxError::MissingSignature)?;
         let signature = Signature::from_bytes(&signature_bytes);
         let from_key = VerifyingKey::from_bytes(&self.from).map_err(|_| TxError::Decode)?;
+        let digest = self.signing_digest()?;
         from_key
-            .verify(&self.message(), &signature)
+            .verify(&digest, &signature)
             .map_err(|_| TxError::InvalidSignature)
     }
 
@@ -141,19 +146,31 @@ impl Tx {
         to_vec(self).map_err(|_| TxError::Encode)
     }
 
-    /// Deserializes a téransaction from Borsh bytes.
+    /// Deserializes a transaction from Borsh bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TxError> {
         Tx::try_from_slice(bytes).map_err(|_| TxError::Decode)
     }
 
-    fn message(&self) -> Vec<u8> {
-        // Sign the Borsh encoding of the transaction without the signature field.
+    /// Computes the canonical transaction identifier using BLAKE3.
+    ///
+    /// The hash is calculated over the Borsh serialization including the optional
+    /// signature. Any modification to the transaction (payload, nonce, signer,
+    /// signature) therefore yields a different identifier. Returns the raw
+    /// [`TxId`] so callers can convert to bytes or hex when needed.
+    pub fn tx_id(&self) -> Result<TxId, TxError> {
+        let bytes = self.to_bytes()?;
+        Ok(hash(&bytes))
+    }
+
+    fn signing_digest(&self) -> Result<[u8; 32], TxError> {
+        // Hash the Borsh encoding of the transaction without the signature field.
         let signable = TxSignable {
             from: self.from,
             nonce: self.nonce,
             kind: self.kind,
         };
-        to_vec(&signable).expect("borsh serialization should not fail")
+        let payload = to_vec(&signable).map_err(|_| TxError::Encode)?;
+        Ok(hash(&payload).into())
     }
 }
 
@@ -301,5 +318,42 @@ mod tests {
         assert_eq!(fee.units(), 250_000);
         let signed = tx.sign(&signing_key).expect("sign");
         assert!(signed.verify_signature().is_ok());
+    }
+
+    #[test]
+    fn tx_id_is_deterministic_for_identical_transactions() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let signed = Tx::new(account_id, 3, TxKind::stake(Crit::from_units(1_500)))
+            .sign(&signing_key)
+            .expect("sign");
+        let duplicate = signed.clone();
+
+        let first_id = signed.tx_id().expect("tx id");
+        let second_id = duplicate.tx_id().expect("tx id duplicate");
+
+        assert_eq!(
+            first_id, second_id,
+            "identical transactions must yield the same identifier"
+        );
+    }
+
+    #[test]
+    fn tx_id_changes_when_transaction_is_tampered() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let signed = Tx::new(account_id, 7, TxKind::stake(Crit::from_units(2_000)))
+            .sign(&signing_key)
+            .expect("sign");
+
+        let mut tampered = signed.clone();
+        // Simulate signature tampering; verification would fail, but tx_id must differ.
+        tampered.signature = Some([0; SIGNATURE_BYTES]);
+
+        let original_id = signed.tx_id().expect("tx id");
+        let tampered_id = tampered.tx_id().expect("tampered tx id");
+
+        assert_ne!(
+            original_id, tampered_id,
+            "changing any field must change the transaction identifier"
+        );
     }
 }
