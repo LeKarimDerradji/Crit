@@ -13,13 +13,14 @@ Problem. In networks where the proposer freely picks a transaction list, a node 
 
 Solution (brief).
 A three-part, verifiable, and enforceable scheme:
-	1.	Signed ACK (receipt of reception).
+  1.	Signed ACK (receipt of reception).
 On directed submit, the validator returns
 Ack = SigV(H(tx) || ckpt_seen || expires_at || qos) → cryptographic proof it received an eligible tx no later than the referenced checkpoint.
-	2.	Periodic mempool commitment.
+  2.	Periodic mempool commitment.
 At each checkpoint, every validator publishes
 MempoolCommit{ckpt, root} where root is a Merkle/KZG root over the eligible, seen tx_hash set. → Enables presence/absence proofs after the fact.
-	3.	Inclusion SLA + penalties.
+  3.	Inclusion SLA + penalties.
 If a validator ACKed a tx, it must (a) include it as soon as feasible, or (b) prove its continuous presence in its MempoolCommits, or (c) issue a signed NACK with a concrete reason (conflict, insufficient fee, etc.). Otherwise: penalty (reputation/slashing-light, fee redistribution).
+
 
 Benefits. Provable withholding, incentivized relay & inclusion, measurable censorship, and compatibility with PBS/relays and inclusion lists.
