@@ -1,3 +1,12 @@
+//! Transaction primitives for Crit: encoding, signing, verification and fee handling.
+//!
+//! A transaction transports a payload [`TxKind`], a monotonically increasing
+//! nonce, the sender public key and, once prepared, an Ed25519 signature. The
+//! types exposed here derive [`BorshSerialize`]/[`BorshDeserialize`] so they can
+//! be persisted and included in checkpoints with Merkle proofs. Signing targets
+//! the Borsh encoding of `(from, nonce, kind)` to avoid circular dependencies
+//! on the signature field.
+
 use crate::account::AccountId;
 use crate::currency::{Crit, CurrencyError};
 use borsh::{BorshDeserialize, BorshSerialize, to_vec};
@@ -7,7 +16,12 @@ use thiserror::Error;
 const PUBKEY_BYTES: usize = 32;
 const SIGNATURE_BYTES: usize = 64;
 
-/// Supported transaction payloads.
+/// Transaction payload accepted by the Crit ledger.
+///
+/// Variants encode the minimal data required for each action:
+/// * `Transfer` – serialized recipient public key and amount to move.
+/// * `Stake` / `Unstake` – amount moved between available balance and stake.
+/// * `ClaimReward` – reward amount credited back to the available balance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
 pub enum TxKind {
     Transfer {
@@ -55,7 +69,7 @@ impl TxKind {
     }
 }
 
-/// Errors produced while working with transactions.
+/// Errors that can be produced while building, signing or decoding transactions.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
     #[error("transaction signature is missing")]
@@ -75,9 +89,13 @@ pub enum TxError {
 /// Canonical representation of a Crit transaction.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct Tx {
+    /// Sender public key in raw Ed25519 format (32 bytes).
     pub from: [u8; PUBKEY_BYTES],
+    /// Monotonically increasing counter used to prevent replay and order actions per account.
     pub nonce: u64,
+    /// Payload describing the action executed by this transaction.
     pub kind: TxKind,
+    /// Optional Ed25519 signature; `None` means the transaction has not been signed yet.
     pub signature: Option<[u8; SIGNATURE_BYTES]>,
 }
 
@@ -123,13 +141,13 @@ impl Tx {
         to_vec(self).map_err(|_| TxError::Encode)
     }
 
-    /// Deserializes a transaction from Borsh bytes.
+    /// Deserializes a téransaction from Borsh bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TxError> {
         Tx::try_from_slice(bytes).map_err(|_| TxError::Decode)
     }
 
     fn message(&self) -> Vec<u8> {
-        // sign only the Borsh encoding of the transaction without the signature field
+        // Sign the Borsh encoding of the transaction without the signature field.
         let signable = TxSignable {
             from: self.from,
             nonce: self.nonce,
@@ -139,6 +157,7 @@ impl Tx {
     }
 }
 
+/// Helper struct containing the fields that are part of the signed message.
 #[derive(BorshSerialize, BorshDeserialize)]
 struct TxSignable {
     from: [u8; PUBKEY_BYTES],
@@ -166,13 +185,9 @@ mod tests {
     #[test]
     fn serialization_round_trip_unstake() {
         let (account_id, signing_key) = Account::generate_account_keys();
-        let tx = Tx::new(
-            account_id,
-            99,
-            TxKind::unstake(Crit::from_units(123_456)),
-        )
-        .sign(&signing_key)
-        .expect("sign");
+        let tx = Tx::new(account_id, 99, TxKind::unstake(Crit::from_units(123_456)))
+            .sign(&signing_key)
+            .expect("sign");
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
@@ -188,13 +203,9 @@ mod tests {
     fn serialization_round_trip_transfer_variant() {
         let (from, signing_key) = Account::generate_account_keys();
         let (to, _) = Account::generate_account_keys();
-        let tx = Tx::new(
-            from,
-            7,
-            TxKind::transfer(&to, Crit::from_units(2_000)),
-        )
-        .sign(&signing_key)
-        .expect("sign");
+        let tx = Tx::new(from, 7, TxKind::transfer(&to, Crit::from_units(2_000)))
+            .sign(&signing_key)
+            .expect("sign");
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
