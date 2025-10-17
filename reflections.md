@@ -3,9 +3,10 @@
 - Explore better pub/address format for accounts and document how it maps to `AccountId` (see `src/account.rs`).
 - Research for best crypto primitives on pub/key gen and source of randomness
 
-## Global Todos
+## Todos
 - Check visibility of inner modules components
 - check usefullness of derive attributes associated to struct and enum (Default, Hash etc);
+- add chain id to avoid replay on other chains (if exists) on wallet or account module.
 
 
 ## Signed ACK + Mempool Commitment: Anti-Withholding / Anti-Censorship
