@@ -4,16 +4,17 @@
 //! nonce, the sender public key and, once prepared, an Ed25519 signature. The
 //! types exposed here derive [`BorshSerialize`]/[`BorshDeserialize`] so they can
 //! be persisted and included in checkpoints with Merkle proofs. Signing targets
-//! the Borsh encoding of `(from, nonce, kind)`, hashed with BLAKE3 to produce a
+//! the Borsh encoding of `(from, nonce, kind)`, hashed with BLAKE3 (via
+//! [`crate::crypto`]) to produce a
 //! fixed-size digest before the Ed25519 signature is computed, avoiding
 //! circular dependencies on the signature field. Transaction identifiers are derived by hashing the
 //! Borsh serialization (including the optional signature) with BLAKE3 via
 //! [`Tx::tx_id`], yielding the canonical [`TxId`].
 
 use crate::account::AccountId;
+use crate::crypto::{blake3_hash, Blake3Hash as TxId};
 use crate::currency::{Crit, CurrencyError};
 use borsh::{to_vec, BorshDeserialize, BorshSerialize};
-use blake3::{hash, Hash as TxId};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use thiserror::Error;
 
@@ -78,16 +79,18 @@ impl TxKind {
 pub enum TxError {
     #[error("transaction signature is missing")]
     MissingSignature,
-    #[error("transaction signature is invalid")]
-    InvalidSignature,
+    #[error("transaction signature is invalid: {reason}")]
+    InvalidSignature { reason: String },
     #[error("attempted to sign transaction with mismatched key")]
     MismatchedSigner,
     #[error("fee computation overflowed")]
     Fee(CurrencyError),
-    #[error("failed to encode transaction")]
-    Encode,
-    #[error("failed to decode transaction")]
-    Decode,
+    #[error("failed to encode transaction: {0}")]
+    Encode(String),
+    #[error("failed to decode transaction: {0}")]
+    Decode(String),
+    #[error("failed to parse sender public key: {0}")]
+    InvalidPublicKey(String),
 }
 
 /// Canonical representation of a Crit transaction.
@@ -134,21 +137,24 @@ impl Tx {
     pub fn verify_signature(&self) -> Result<(), TxError> {
         let signature_bytes = self.signature.ok_or(TxError::MissingSignature)?;
         let signature = Signature::from_bytes(&signature_bytes);
-        let from_key = VerifyingKey::from_bytes(&self.from).map_err(|_| TxError::Decode)?;
+        let from_key = VerifyingKey::from_bytes(&self.from)
+            .map_err(|err| TxError::InvalidPublicKey(err.to_string()))?;
         let digest = self.signing_digest()?;
         from_key
             .verify(&digest, &signature)
-            .map_err(|_| TxError::InvalidSignature)
+            .map_err(|err| TxError::InvalidSignature {
+                reason: err.to_string(),
+            })
     }
 
     /// Serializes the transaction (including signature) using Borsh.
     pub fn to_bytes(&self) -> Result<Vec<u8>, TxError> {
-        to_vec(self).map_err(|_| TxError::Encode)
+        to_vec(self).map_err(|err| TxError::Encode(err.to_string()))
     }
 
     /// Deserializes a transaction from Borsh bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TxError> {
-        Tx::try_from_slice(bytes).map_err(|_| TxError::Decode)
+        Tx::try_from_slice(bytes).map_err(|err| TxError::Decode(err.to_string()))
     }
 
     /// Computes the canonical transaction identifier using BLAKE3.
@@ -159,7 +165,7 @@ impl Tx {
     /// [`TxId`] so callers can convert to bytes or hex when needed.
     pub fn tx_id(&self) -> Result<TxId, TxError> {
         let bytes = self.to_bytes()?;
-        Ok(hash(&bytes))
+        Ok(blake3_hash(&bytes))
     }
 
     fn signing_digest(&self) -> Result<[u8; 32], TxError> {
@@ -169,8 +175,9 @@ impl Tx {
             nonce: self.nonce,
             kind: self.kind,
         };
-        let payload = to_vec(&signable).map_err(|_| TxError::Encode)?;
-        Ok(hash(&payload).into())
+        let payload = to_vec(&signable).map_err(|err| TxError::Encode(err.to_string()))?;
+        let hash = blake3_hash(&payload);
+        Ok(*hash.as_bytes())
     }
 }
 
@@ -262,7 +269,7 @@ mod tests {
     #[test]
     fn deserializing_invalid_bytes_fails() {
         let bytes = vec![0u8; 3]; // too short
-        assert!(matches!(Tx::from_bytes(&bytes), Err(TxError::Decode)));
+        assert!(matches!(Tx::from_bytes(&bytes), Err(TxError::Decode(_))));
     }
 
     #[test]
@@ -285,7 +292,7 @@ mod tests {
         tampered.from = other_id.to_bytes();
         assert!(matches!(
             tampered.verify_signature(),
-            Err(TxError::InvalidSignature)
+            Err(TxError::InvalidSignature { .. })
         ));
 
         // Missing signature
@@ -304,7 +311,7 @@ mod tests {
         tx.from = [0u8; PUBKEY_BYTES];
         assert!(matches!(
             tx.verify_signature(),
-            Err(TxError::Decode | TxError::InvalidSignature)
+            Err(TxError::InvalidPublicKey(_)) | Err(TxError::InvalidSignature { .. })
         ));
     }
 
