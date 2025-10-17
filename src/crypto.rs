@@ -1,12 +1,13 @@
 //! Minimal cryptographic helpers for prototype purposes.
 //!
-//! This module currently exposes a simple Ed25519 keypair generator so that
-//! higher layers can be wired without committing to a final cryptographic
-//! design. The implementation should be revisited once the networking and
-//! consensus layers impose stronger requirements (hardware wallets, VRF,
-//! multisignatures, etc.).
+//! This module currently exposes a simple Ed25519 keypair generator and thin
+//! wrappers around BLAKE3 so that higher layers can be wired without committing
+//! to a final cryptographic design. The implementation should be revisited once
+//! the networking and consensus layers impose stronger requirements (hardware
+//! wallets, VRF, multisignatures, etc.).
 
 use crate::random;
+pub use blake3::Hash as Blake3Hash;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 /// Generates an Ed25519 keypair using the thread-local cryptographic RNG.
@@ -15,6 +16,11 @@ pub fn generate_keypair() -> (VerifyingKey, SigningKey) {
     let signing = SigningKey::generate(&mut rng);
     let verifying = signing.verifying_key();
     (verifying, signing)
+}
+
+/// Computes the BLAKE3 hash of `input`.
+pub fn blake3_hash(input: &[u8]) -> Blake3Hash {
+    blake3::hash(input)
 }
 
 #[cfg(test)]
@@ -84,5 +90,13 @@ mod tests {
             public2.verify(b"crit wrong key", &signature).is_err(),
             "verification should fail with a different public key"
         );
+    }
+
+    #[test]
+    fn blake3_helpers_return_consistent_results() {
+        let input = b"crit hashing";
+        let hash = blake3_hash(input);
+        let digest: [u8; 32] = *hash.as_bytes();
+        assert_eq!(hash.as_bytes(), &digest);
     }
 }
