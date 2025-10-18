@@ -194,6 +194,91 @@ struct TxSignable {
     kind: TxKind,
 }
 
+/// Errors returned by [`TransactionCollector`] when filtering incoming transactions.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum CollectError {
+    #[error("transaction targets unexpected network (expected {expected}, found {found})")]
+    WrongNetwork { expected: NetId, found: NetId },
+    #[error("transaction signature rejected")]
+    Signature(#[from] TxError),
+    #[error("transaction amount must be greater than zero")]
+    EmptyAmount,
+    #[error("transfer destination matches sender")]
+    SelfTransfer,
+}
+
+/// Utility that gathers valid transactions before handing them to the state layer.
+///
+/// Transactions pushed into the collector must:
+/// * target the configured [`NetId`];
+/// * include a valid Ed25519 signature;
+/// * move a non-zero amount; and
+/// * for transfers, target a different recipient than the sender.
+pub struct TransactionCollector {
+    network_id: NetId,
+    buffer: Vec<Tx>,
+}
+
+impl TransactionCollector {
+    /// Creates a collector that only accepts transactions for `network_id`.
+    pub fn new(network_id: NetId) -> Self {
+        Self {
+            network_id,
+            buffer: Vec::new(),
+        }
+    }
+
+    /// Attempts to enqueue `tx`, rejecting it if validation fails.
+    pub fn push(&mut self, tx: Tx) -> Result<(), CollectError> {
+        self.validate(&tx)?;
+        self.buffer.push(tx);
+        Ok(())
+    }
+
+    /// Returns the collected transactions without draining them.
+    pub fn batch(&self) -> &[Tx] {
+        &self.buffer
+    }
+
+    /// Drains the current batch, returning ownership of the collected transactions.
+    pub fn drain(&mut self) -> Vec<Tx> {
+        std::mem::take(&mut self.buffer)
+    }
+
+    /// Number of transactions currently buffered.
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Returns `true` when no transactions are buffered.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    fn validate(&self, tx: &Tx) -> Result<(), CollectError> {
+        if tx.network_id != self.network_id {
+            return Err(CollectError::WrongNetwork {
+                expected: self.network_id,
+                found: tx.network_id,
+            });
+        }
+
+        tx.verify_signature().map_err(CollectError::from)?;
+
+        if tx.kind.amount() == Crit::ZERO {
+            return Err(CollectError::EmptyAmount);
+        }
+
+        if let TxKind::Transfer { to, .. } = tx.kind {
+            if to == tx.from {
+                return Err(CollectError::SelfTransfer);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +536,117 @@ mod tests {
             signed_test.tx_id().expect("test id"),
             "network id participates in tx identifier hashing"
         );
+    }
+
+    #[test]
+    fn collector_accepts_valid_transaction() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::stake(Crit::from_units(5_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        collector.push(tx.clone()).expect("collector push");
+        assert_eq!(collector.len(), 1);
+        assert_eq!(collector.batch()[0].tx_id().unwrap(), tx.tx_id().unwrap());
+    }
+
+    #[test]
+    fn collector_rejects_wrong_network() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(
+            TEST_NET,
+            account_id,
+            1,
+            TxKind::stake(Crit::from_units(5_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::WrongNetwork {
+                expected: MAIN_NET,
+                found: TEST_NET
+            })
+        ));
+        assert!(collector.is_empty());
+    }
+
+    #[test]
+    fn collector_rejects_missing_signature() {
+        let (account_id, _) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::stake(Crit::from_units(5_000)),
+        );
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::Signature(TxError::MissingSignature))
+        ));
+    }
+
+    #[test]
+    fn collector_rejects_zero_amount_transactions() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(MAIN_NET, account_id, 1, TxKind::stake(Crit::ZERO))
+            .sign(&signing_key)
+            .expect("sign");
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::EmptyAmount)
+        ));
+    }
+
+    #[test]
+    fn collector_rejects_self_transfer() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::transfer(&account_id, Crit::from_units(1_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::SelfTransfer)
+        ));
+    }
+
+    #[test]
+    fn collector_drain_emits_transactions() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        for nonce in 1..=3 {
+            let tx = Tx::new(
+                MAIN_NET,
+                account_id,
+                nonce,
+                TxKind::stake(Crit::from_units(1_000)),
+            )
+            .sign(&signing_key)
+            .expect("sign");
+            collector.push(tx).expect("collect");
+        }
+
+        let drained = collector.drain();
+        assert_eq!(drained.len(), 3);
+        assert!(collector.is_empty());
     }
 }
