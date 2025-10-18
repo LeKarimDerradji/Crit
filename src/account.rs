@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::crypto;
 use crate::currency::Crit;
+use crate::network::NetId;
 use crate::wallet::{Wallet, WalletError};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
@@ -28,6 +29,7 @@ pub enum AccountError {
 /// update succeeds, guaranteeing atomicity between the two.
 #[derive(Debug, Clone, Copy)]
 pub struct Account {
+    pub network_id: NetId,
     /// Monotonically increasing nonce used for replay protection.
     pub nonce: u64,
     wallet: Wallet,
@@ -38,6 +40,15 @@ impl Account {
     pub fn generate_account_keys() -> (AccountId, SigningKey) {
         let (public, private) = crypto::generate_keypair();
         (public, private)
+    }
+
+    /// Creates a new account bound to the provided network identifier.
+    pub fn new(network_id: NetId) -> Self {
+        Self {
+            network_id,
+            nonce: 0,
+            wallet: Wallet::new(),
+        }
     }
 
     /// Bumps the nonce by one, ensuring it never wraps.
@@ -94,13 +105,11 @@ impl Account {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::MAIN_NET;
     use ed25519_dalek::{Signer, Verifier};
 
     fn new_account() -> Account {
-        Account {
-            nonce: 0,
-            wallet: Wallet::new(),
-        }
+        Account::new(MAIN_NET)
     }
 
     fn balances(account: &Account) -> (u128, u128, u128) {
@@ -109,6 +118,14 @@ mod tests {
             u128::from(account.wallet.staked_balance()),
             u128::from(account.wallet.reward_balance()),
         )
+    }
+
+    #[test]
+    fn new_initializes_zeroed_wallet_and_nonce() {
+        let account = Account::new(MAIN_NET);
+        assert_eq!(account.network_id, MAIN_NET);
+        assert_eq!(account.nonce, 0);
+        assert_eq!(balances(&account), (0, 0, 0));
     }
 
     #[test]

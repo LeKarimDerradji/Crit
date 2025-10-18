@@ -4,7 +4,7 @@
 //! nonce, the sender public key and, once prepared, an Ed25519 signature. The
 //! types exposed here derive [`BorshSerialize`]/[`BorshDeserialize`] so they can
 //! be persisted and included in checkpoints with Merkle proofs. Signing targets
-//! the Borsh encoding of `(from, nonce, kind)`, hashed with BLAKE3 (via
+//! the Borsh encoding of `(network_id, from, nonce, kind)`, hashed with BLAKE3 (via
 //! [`crate::crypto`]) to produce a
 //! fixed-size digest before the Ed25519 signature is computed, avoiding
 //! circular dependencies on the signature field. Transaction identifiers are derived by hashing the
@@ -12,9 +12,10 @@
 //! [`Tx::tx_id`], yielding the canonical [`TxId`].
 
 use crate::account::AccountId;
-use crate::crypto::{blake3_hash, Blake3Hash as TxId};
+use crate::crypto::{Blake3Hash as TxId, blake3_hash};
 use crate::currency::{Crit, CurrencyError};
-use borsh::{to_vec, BorshDeserialize, BorshSerialize};
+use crate::network::NetId;
+use borsh::{BorshDeserialize, BorshSerialize, to_vec};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use thiserror::Error;
 
@@ -96,6 +97,8 @@ pub enum TxError {
 /// Canonical representation of a Crit transaction.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize, PartialEq, Eq)]
 pub struct Tx {
+    /// Identifies the Crit network the transaction targets.
+    pub network_id: NetId,
     /// Sender public key in raw Ed25519 format (32 bytes).
     pub from: [u8; PUBKEY_BYTES],
     /// Monotonically increasing counter used to prevent replay and order actions per account.
@@ -108,8 +111,9 @@ pub struct Tx {
 
 impl Tx {
     /// Creates a new unsigned transaction.
-    pub fn new(from: AccountId, nonce: u64, kind: TxKind) -> Self {
+    pub fn new(network_id: NetId, from: AccountId, nonce: u64, kind: TxKind) -> Self {
         Self {
+            network_id,
             from: from.to_bytes(),
             nonce,
             kind,
@@ -171,19 +175,20 @@ impl Tx {
     fn signing_digest(&self) -> Result<[u8; 32], TxError> {
         // Hash the Borsh encoding of the transaction without the signature field.
         let signable = TxSignable {
+            network_id: self.network_id,
             from: self.from,
             nonce: self.nonce,
             kind: self.kind,
         };
         let payload = to_vec(&signable).map_err(|err| TxError::Encode(err.to_string()))?;
-        let hash = blake3_hash(&payload);
-        Ok(*hash.as_bytes())
+        Ok(blake3_hash(&payload).into())
     }
 }
 
 /// Helper struct containing the fields that are part of the signed message.
 #[derive(BorshSerialize, BorshDeserialize)]
 struct TxSignable {
+    network_id: NetId,
     from: [u8; PUBKEY_BYTES],
     nonce: u64,
     kind: TxKind,
@@ -193,11 +198,17 @@ struct TxSignable {
 mod tests {
     use super::*;
     use crate::account::Account;
+    use crate::network::{MAIN_NET, TEST_NET};
+
+    fn stake_tx(account_id: AccountId) -> Tx {
+        Tx::new(MAIN_NET, account_id, 0, TxKind::Stake { amount: Crit::ONE })
+    }
 
     #[test]
     fn signing_and_verification_round_trip() {
         let (account_id, signing_key) = Account::generate_account_keys();
         let tx = Tx::new(
+            MAIN_NET,
             account_id,
             42,
             TxKind::transfer(&account_id, Crit::from_units(1_000)),
@@ -209,13 +220,19 @@ mod tests {
     #[test]
     fn serialization_round_trip_unstake() {
         let (account_id, signing_key) = Account::generate_account_keys();
-        let tx = Tx::new(account_id, 99, TxKind::unstake(Crit::from_units(123_456)))
-            .sign(&signing_key)
-            .expect("sign");
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            99,
+            TxKind::unstake(Crit::from_units(123_456)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
 
+        assert_eq!(decoded.network_id, MAIN_NET);
         assert_eq!(decoded.from, tx.from);
         assert_eq!(decoded.nonce, tx.nonce);
         assert!(matches!(decoded.kind, TxKind::Unstake { amount } if amount.units() == 123_456));
@@ -227,13 +244,19 @@ mod tests {
     fn serialization_round_trip_transfer_variant() {
         let (from, signing_key) = Account::generate_account_keys();
         let (to, _) = Account::generate_account_keys();
-        let tx = Tx::new(from, 7, TxKind::transfer(&to, Crit::from_units(2_000)))
-            .sign(&signing_key)
-            .expect("sign");
+        let tx = Tx::new(
+            MAIN_NET,
+            from,
+            7,
+            TxKind::transfer(&to, Crit::from_units(2_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
 
+        assert_eq!(decoded.network_id, MAIN_NET);
         assert_eq!(decoded.from, tx.from);
         assert_eq!(decoded.nonce, tx.nonce);
         assert_eq!(decoded.kind, TxKind::transfer(&to, Crit::from_units(2_000)));
@@ -244,11 +267,12 @@ mod tests {
     #[test]
     fn serialization_round_trip_stake_variant() {
         let (from, _) = Account::generate_account_keys();
-        let tx = Tx::new(from, 11, TxKind::stake(Crit::from_units(42_000)));
+        let tx = Tx::new(MAIN_NET, from, 11, TxKind::stake(Crit::from_units(42_000)));
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
 
+        assert_eq!(decoded.network_id, MAIN_NET);
         assert_eq!(decoded.from, tx.from);
         assert_eq!(decoded.nonce, tx.nonce);
         assert_eq!(decoded.kind, TxKind::stake(Crit::from_units(42_000)));
@@ -258,11 +282,17 @@ mod tests {
     #[test]
     fn serialization_round_trip_claim_variant() {
         let (from, _) = Account::generate_account_keys();
-        let tx = Tx::new(from, 5, TxKind::claim_reward(Crit::from_units(77_777)));
+        let tx = Tx::new(
+            MAIN_NET,
+            from,
+            5,
+            TxKind::claim_reward(Crit::from_units(77_777)),
+        );
 
         let bytes = tx.to_bytes().expect("serialize");
         let decoded = Tx::from_bytes(&bytes).expect("deserialize");
 
+        assert_eq!(decoded.network_id, MAIN_NET);
         assert_eq!(decoded.kind, TxKind::claim_reward(Crit::from_units(77_777)));
     }
 
@@ -273,31 +303,51 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_key_fails_to_sign() {
-        let (account_id, signing_key) = Account::generate_account_keys();
-        let (other_id, other_sk) = Account::generate_account_keys();
-        let tx = Tx::new(account_id, 0, TxKind::Stake { amount: Crit::ONE });
+    fn signing_with_mismatched_key_fails() {
+        let (account_id, _) = Account::generate_account_keys();
+        let (_, other_sk) = Account::generate_account_keys();
+        let tx = stake_tx(account_id);
 
         assert!(matches!(
             tx.clone().sign(&other_sk),
             Err(TxError::MismatchedSigner)
         ));
+    }
 
-        // Ensure original key still works.
+    #[test]
+    fn signing_with_matching_key_succeeds() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = stake_tx(account_id);
         let signed = tx.sign(&signing_key).expect("should sign");
         assert!(signed.verify_signature().is_ok());
+    }
 
-        // Tamper the signer (replay attack with different key) using the same signature.
+    #[test]
+    fn verify_signature_detects_signer_tampering() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let (other_id, _) = Account::generate_account_keys();
+        let signed = stake_tx(account_id)
+            .sign(&signing_key)
+            .expect("should sign");
         let mut tampered = signed.clone();
         tampered.from = other_id.to_bytes();
         assert!(matches!(
             tampered.verify_signature(),
             Err(TxError::InvalidSignature { .. })
         ));
+    }
 
-        // Missing signature
+    #[test]
+    fn verify_signature_requires_signature() {
+        let (account_id, _) = Account::generate_account_keys();
+        let unsigned = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::Unstake { amount: Crit::ONE },
+        );
         assert!(matches!(
-            Tx::new(other_id, 1, TxKind::Unstake { amount: Crit::ONE }).verify_signature(),
+            unsigned.verify_signature(),
             Err(TxError::MissingSignature)
         ));
     }
@@ -305,7 +355,7 @@ mod tests {
     #[test]
     fn verify_signature_fails_with_invalid_public_key_bytes() {
         let (account_id, signing_key) = Account::generate_account_keys();
-        let mut tx = Tx::new(account_id, 0, TxKind::stake(Crit::ONE))
+        let mut tx = Tx::new(MAIN_NET, account_id, 0, TxKind::stake(Crit::ONE))
             .sign(&signing_key)
             .expect("sign");
         tx.from = [0u8; PUBKEY_BYTES];
@@ -319,7 +369,12 @@ mod tests {
     fn fee_computation_uses_currency_rules() {
         let (account_id, signing_key) = Account::generate_account_keys();
         let amount = Crit::from_units(250_000_000); // 2.5 CRIT
-        let tx = Tx::new(account_id, 1, TxKind::transfer(&account_id, amount));
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::transfer(&account_id, amount),
+        );
         let fee = tx.fee().expect("fee");
         // 0.1% of 2.5 CRIT = 0.0025 CRIT = 250_000 units.
         assert_eq!(fee.units(), 250_000);
@@ -330,9 +385,14 @@ mod tests {
     #[test]
     fn tx_id_is_deterministic_for_identical_transactions() {
         let (account_id, signing_key) = Account::generate_account_keys();
-        let signed = Tx::new(account_id, 3, TxKind::stake(Crit::from_units(1_500)))
-            .sign(&signing_key)
-            .expect("sign");
+        let signed = Tx::new(
+            MAIN_NET,
+            account_id,
+            3,
+            TxKind::stake(Crit::from_units(1_500)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
         let duplicate = signed.clone();
 
         let first_id = signed.tx_id().expect("tx id");
@@ -347,9 +407,14 @@ mod tests {
     #[test]
     fn tx_id_changes_when_transaction_is_tampered() {
         let (account_id, signing_key) = Account::generate_account_keys();
-        let signed = Tx::new(account_id, 7, TxKind::stake(Crit::from_units(2_000)))
-            .sign(&signing_key)
-            .expect("sign");
+        let signed = Tx::new(
+            MAIN_NET,
+            account_id,
+            7,
+            TxKind::stake(Crit::from_units(2_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
 
         let mut tampered = signed.clone();
         // Simulate signature tampering; verification would fail, but tx_id must differ.
@@ -361,6 +426,30 @@ mod tests {
         assert_ne!(
             original_id, tampered_id,
             "changing any field must change the transaction identifier"
+        );
+    }
+
+    #[test]
+    fn identical_payloads_on_different_networks_produce_distinct_signatures() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let kind = TxKind::stake(Crit::from_units(10_000));
+
+        let main_tx = Tx::new(MAIN_NET, account_id, 1, kind);
+        let test_tx = Tx::new(TEST_NET, account_id, 1, kind);
+
+        let signed_main = main_tx.clone().sign(&signing_key).expect("main sign");
+        let signed_test = test_tx.clone().sign(&signing_key).expect("test sign");
+
+        assert_ne!(
+            signed_main.signature,
+            signed_test.signature,
+            "different networks must yield different signatures"
+        );
+
+        assert_ne!(
+            signed_main.tx_id().expect("main id"),
+            signed_test.tx_id().expect("test id"),
+            "network id participates in tx identifier hashing"
         );
     }
 }
