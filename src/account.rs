@@ -100,6 +100,21 @@ impl Account {
     pub fn claim_reward(&mut self, amount: Crit) -> Result<(), AccountError> {
         self.apply_with_nonce(|wallet| wallet.debit_reward(amount))
     }
+
+    /// Returns the spendable balance associated with this account.
+    pub fn available_balance(&self) -> Crit {
+        self.wallet.available_balance()
+    }
+
+    /// Returns the amount currently staked.
+    pub fn staked_balance(&self) -> Crit {
+        self.wallet.staked_balance()
+    }
+
+    /// Returns the accumulated reward balance.
+    pub fn reward_balance(&self) -> Crit {
+        self.wallet.reward_balance()
+    }
 }
 
 #[cfg(test)]
