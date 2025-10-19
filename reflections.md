@@ -25,3 +25,6 @@ If a validator ACKed a tx, it must (a) include it as soon as feasible, or (b) pr
 
 
 Benefits. Provable withholding, incentivized relay & inclusion, measurable censorship, and compatibility with PBS/relays and inclusion lists.
+
+## Unordered Global Mempool Sketch
+Inspired by work such as Sui's Narwhal/Bullshark pipeline, we could explore a gossip-based, unordered global mempool. Each validator assembles batches of transactions and gossips them, referencing parent batches to form a DAG. Validators vote on an ordering over this DAG, with stake-weighted quorum determining the final sequence that feeds the execution layer. This separates availability from ordering, offers resilience against equivocation, and lets the execution pipeline consume batches once the quorum certifies their total order.
