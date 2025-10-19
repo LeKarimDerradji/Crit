@@ -201,6 +201,8 @@ pub enum CollectError {
     WrongNetwork { expected: NetId, found: NetId },
     #[error("transaction signature rejected")]
     Signature(#[from] TxError),
+    #[error("transfer recipient public key is invalid")]
+    InvalidRecipient,
     #[error("transaction amount must be greater than zero")]
     EmptyAmount,
     #[error("transfer destination matches sender")]
@@ -209,11 +211,11 @@ pub enum CollectError {
 
 /// Utility that gathers valid transactions before handing them to the state layer.
 ///
-/// Transactions pushed into the collector must:
-/// * target the configured [`NetId`];
-/// * include a valid Ed25519 signature;
-/// * move a non-zero amount; and
-/// * for transfers, target a different recipient than the sender.
+/// A transaction is accepted if and only if it:
+/// * targets the configured [`NetId`];
+/// * carries a valid Ed25519 signature;
+/// * moves a non-zero amount; and
+/// * for transfers, sends funds to an address different from the sender.
 pub struct TransactionCollector {
     network_id: NetId,
     buffer: Vec<Tx>,
@@ -230,7 +232,7 @@ impl TransactionCollector {
 
     /// Attempts to enqueue `tx`, rejecting it if validation fails.
     pub fn push(&mut self, tx: Tx) -> Result<(), CollectError> {
-        self.validate(&tx)?;
+        self.check(&tx)?;
         self.buffer.push(tx);
         Ok(())
     }
@@ -255,7 +257,12 @@ impl TransactionCollector {
         self.buffer.is_empty()
     }
 
-    fn validate(&self, tx: &Tx) -> Result<(), CollectError> {
+    /// Applies the stateless validation rules to `tx`:
+    /// - the transaction network matches the collector network;
+    /// - the signature verifies against the embedded public key;
+    /// - the moved amount is strictly greater than zero; and
+    /// - transfers do not target the sender themselves.
+    fn check(&self, tx: &Tx) -> Result<(), CollectError> {
         if tx.network_id != self.network_id {
             return Err(CollectError::WrongNetwork {
                 expected: self.network_id,
@@ -270,6 +277,7 @@ impl TransactionCollector {
         }
 
         if let TxKind::Transfer { to, .. } = tx.kind {
+            VerifyingKey::from_bytes(&to).map_err(|_| CollectError::InvalidRecipient)?;
             if to == tx.from {
                 return Err(CollectError::SelfTransfer);
             }
@@ -526,8 +534,7 @@ mod tests {
         let signed_test = test_tx.clone().sign(&signing_key).expect("test sign");
 
         assert_ne!(
-            signed_main.signature,
-            signed_test.signature,
+            signed_main.signature, signed_test.signature,
             "different networks must yield different signatures"
         );
 
@@ -604,10 +611,7 @@ mod tests {
             .expect("sign");
 
         let mut collector = TransactionCollector::new(MAIN_NET);
-        assert!(matches!(
-            collector.push(tx),
-            Err(CollectError::EmptyAmount)
-        ));
+        assert!(matches!(collector.push(tx), Err(CollectError::EmptyAmount)));
     }
 
     #[test]
@@ -626,6 +630,40 @@ mod tests {
         assert!(matches!(
             collector.push(tx),
             Err(CollectError::SelfTransfer)
+        ));
+    }
+
+    #[test]
+    fn collector_rejects_invalid_transfer_recipient() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let invalid_recipient = (0u32..)
+            .find_map(|seed| {
+                let mut candidate = [0u8; PUBKEY_BYTES];
+                candidate[0] = (seed & 0xFF) as u8;
+                candidate[1] = ((seed >> 8) & 0xFF) as u8;
+                if VerifyingKey::from_bytes(&candidate).is_err() {
+                    Some(candidate)
+                } else {
+                    None
+                }
+            })
+            .expect("should find an invalid recipient key");
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            1,
+            TxKind::Transfer {
+                to: invalid_recipient,
+                amount: Crit::from_units(1_000),
+            },
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        let mut collector = TransactionCollector::new(MAIN_NET);
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::InvalidRecipient)
         ));
     }
 
