@@ -263,26 +263,45 @@ impl TransactionCollector {
     /// - the moved amount is strictly greater than zero; and
     /// - transfers do not target the sender themselves.
     fn check(&self, tx: &Tx) -> Result<(), CollectError> {
+        self.check_network(tx)?;
+        Self::check_signature(tx)?;
+        Self::check_amount(tx)?;
+        Self::check_transfer_rules(tx)?;
+        Ok(())
+    }
+
+    /// Checks that the transaction targets the same network as the collector.
+    fn check_network(&self, tx: &Tx) -> Result<(), CollectError> {
         if tx.network_id != self.network_id {
             return Err(CollectError::WrongNetwork {
                 expected: self.network_id,
                 found: tx.network_id,
             });
         }
+        Ok(())
+    }
 
-        tx.verify_signature().map_err(CollectError::from)?;
+    /// Verifies the embedded signature against the `from` public key.
+    fn check_signature(tx: &Tx) -> Result<(), CollectError> {
+        tx.verify_signature().map_err(CollectError::from)
+    }
 
+    /// Rejects zero-amount transactions, guaranteeing a positive transfer/stake.
+    fn check_amount(tx: &Tx) -> Result<(), CollectError> {
         if tx.kind.amount() == Crit::ZERO {
             return Err(CollectError::EmptyAmount);
         }
+        Ok(())
+    }
 
+    /// Applies transfer-specific guards: valid recipient key and no self-transfer.
+    fn check_transfer_rules(tx: &Tx) -> Result<(), CollectError> {
         if let TxKind::Transfer { to, .. } = tx.kind {
             VerifyingKey::from_bytes(&to).map_err(|_| CollectError::InvalidRecipient)?;
             if to == tx.from {
                 return Err(CollectError::SelfTransfer);
             }
         }
-
         Ok(())
     }
 }
