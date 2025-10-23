@@ -133,7 +133,7 @@ impl Tx {
     }
 
     /// Returns the verifying key corresponding to `from`.
-    fn sender_key(&self) -> Result<VerifyingKey, TxError> {
+    fn check_sender_key(&self) -> Result<VerifyingKey, TxError> {
         VerifyingKey::from_bytes(&self.from)
             .map_err(|err| TxError::InvalidPublicKey(err.to_string()))
     }
