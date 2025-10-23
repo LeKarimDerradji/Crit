@@ -84,6 +84,8 @@ pub enum TxError {
     InvalidSignature { reason: String },
     #[error("attempted to sign transaction with mismatched key")]
     MismatchedSigner,
+    #[error("transfer recipient key is invalid")]
+    InvalidTransferRecipient,
     #[error("fee computation overflowed")]
     Fee(CurrencyError),
     #[error("failed to encode transaction: {0}")]
@@ -121,6 +123,43 @@ impl Tx {
         }
     }
 
+    /// Runs stateless validation checks on the transaction.
+    pub fn check_stateless(&self) -> Result<(), CollectError> {
+        self.sender_key().map_err(CollectError::Signature)?;
+        Self::check_signature(self)?;
+        Self::check_amount(self)?;
+        Self::check_transfer_rules(self)?;
+        Ok(())
+    }
+
+    /// Returns the verifying key corresponding to `from`.
+    fn sender_key(&self) -> Result<VerifyingKey, TxError> {
+        VerifyingKey::from_bytes(&self.from)
+            .map_err(|err| TxError::InvalidPublicKey(err.to_string()))
+    }
+
+    fn check_signature(&self) -> Result<(), CollectError> {
+        self.verify_signature().map_err(CollectError::from)
+    }
+
+    fn check_amount(&self) -> Result<(), CollectError> {
+        if self.kind.amount() == Crit::ZERO {
+            return Err(CollectError::EmptyAmount);
+        }
+        Ok(())
+    }
+
+    fn check_transfer_rules(&self) -> Result<(), CollectError> {
+        if let TxKind::Transfer { to, .. } = self.kind {
+            VerifyingKey::from_bytes(&to)
+                .map_err(|_| CollectError::Signature(TxError::InvalidTransferRecipient))?;
+            if to == self.from {
+                return Err(CollectError::SelfTransfer);
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the fee associated with this transaction according to the currency rules.
     pub fn fee(&self) -> Result<Crit, TxError> {
         Crit::compute_fee(self.kind.amount()).map_err(TxError::Fee)
@@ -141,8 +180,7 @@ impl Tx {
     pub fn verify_signature(&self) -> Result<(), TxError> {
         let signature_bytes = self.signature.ok_or(TxError::MissingSignature)?;
         let signature = Signature::from_bytes(&signature_bytes);
-        let from_key = VerifyingKey::from_bytes(&self.from)
-            .map_err(|err| TxError::InvalidPublicKey(err.to_string()))?;
+        let from_key = self.sender_key()?;
         let digest = self.signing_digest()?;
         from_key
             .verify(&digest, &signature)
@@ -201,8 +239,6 @@ pub enum CollectError {
     WrongNetwork { expected: NetId, found: NetId },
     #[error("transaction signature rejected")]
     Signature(#[from] TxError),
-    #[error("transfer recipient public key is invalid")]
-    InvalidRecipient,
     #[error("transaction amount must be greater than zero")]
     EmptyAmount,
     #[error("transfer destination matches sender")]
@@ -264,9 +300,7 @@ impl TransactionCollector {
     /// - transfers do not target the sender themselves.
     fn check(&self, tx: &Tx) -> Result<(), CollectError> {
         self.check_network(tx)?;
-        Self::check_signature(tx)?;
-        Self::check_amount(tx)?;
-        Self::check_transfer_rules(tx)?;
+        tx.check_stateless()?;
         Ok(())
     }
 
@@ -277,30 +311,6 @@ impl TransactionCollector {
                 expected: self.network_id,
                 found: tx.network_id,
             });
-        }
-        Ok(())
-    }
-
-    /// Verifies the embedded signature against the `from` public key.
-    fn check_signature(tx: &Tx) -> Result<(), CollectError> {
-        tx.verify_signature().map_err(CollectError::from)
-    }
-
-    /// Rejects zero-amount transactions, guaranteeing a positive transfer/stake.
-    fn check_amount(tx: &Tx) -> Result<(), CollectError> {
-        if tx.kind.amount() == Crit::ZERO {
-            return Err(CollectError::EmptyAmount);
-        }
-        Ok(())
-    }
-
-    /// Applies transfer-specific guards: valid recipient key and no self-transfer.
-    fn check_transfer_rules(tx: &Tx) -> Result<(), CollectError> {
-        if let TxKind::Transfer { to, .. } = tx.kind {
-            VerifyingKey::from_bytes(&to).map_err(|_| CollectError::InvalidRecipient)?;
-            if to == tx.from {
-                return Err(CollectError::SelfTransfer);
-            }
         }
         Ok(())
     }
@@ -682,7 +692,7 @@ mod tests {
         let mut collector = TransactionCollector::new(MAIN_NET);
         assert!(matches!(
             collector.push(tx),
-            Err(CollectError::InvalidRecipient)
+            Err(CollectError::Signature(TxError::InvalidTransferRecipient))
         ));
     }
 
