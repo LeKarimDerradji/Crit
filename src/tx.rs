@@ -78,22 +78,36 @@ impl TxKind {
 /// Errors that can be produced while building, signing or decoding transactions.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum TxError {
+    /// The transaction does not carry a signature.
     #[error("transaction signature is missing")]
     MissingSignature,
+    /// The transaction signature cannot be verified.
     #[error("transaction signature is invalid: {reason}")]
     InvalidSignature { reason: String },
+    /// Attempted to sign the transaction with a key that does not match `from`.
     #[error("attempted to sign transaction with mismatched key")]
     MismatchedSigner,
-    #[error("transfer recipient key is invalid")]
-    InvalidTransferRecipient,
+    /// The `from` field is not a valid Ed25519 public key.
+    #[error("sender public key is invalid")]
+    InvalidSenderKey,
+    /// The transfer recipient key is not a valid Ed25519 public key.
+    #[error("recipient public key is invalid")]
+    InvalidRecipientKey,
+    /// Transactions must move a strictly positive amount of CRIT.
+    #[error("transaction amount must be greater than zero")]
+    AmountZero,
+    /// Transfers may not send funds to the sender itself.
+    #[error("transfer destination matches sender")]
+    SelfTransfer,
+    /// Fee computation overflowed in the currency layer.
     #[error("fee computation overflowed")]
     Fee(CurrencyError),
+    /// Borsh serialization failed.
     #[error("failed to encode transaction: {0}")]
     Encode(String),
+    /// Borsh deserialization failed.
     #[error("failed to decode transaction: {0}")]
     Decode(String),
-    #[error("failed to parse sender public key: {0}")]
-    InvalidPublicKey(String),
 }
 
 /// Canonical representation of a Crit transaction.
@@ -123,39 +137,56 @@ impl Tx {
         }
     }
 
-    /// Runs stateless validation checks on the transaction.
-    pub fn check_stateless(&self) -> Result<(), CollectError> {
-        self.sender_key().map_err(CollectError::Signature)?;
-        Self::check_signature(self)?;
-        Self::check_amount(self)?;
-        Self::check_transfer_rules(self)?;
+    /// Runs all stateless validation checks on the transaction (`from` key, signature,
+    /// positive amount, transfer-specific invariants).
+    ///
+    /// The caller is responsible for checking the network id before invoking this method;
+    /// the [`TransactionCollector`] performs this guard internally.
+    ///
+    /// This does **not** check the network id; callers (e.g. the collector) are expected
+    /// to compare `self.network_id` with their expected network before calling this.
+    pub fn check_stateless(&self) -> Result<(), TxError> {
+        self.verify_signature()?; // verify sender key and signature.
+        self.check_amount()?;
+        self.check_transfer_rules()?;
         Ok(())
     }
 
-    /// Returns the verifying key corresponding to `from`.
-    fn check_sender_key(&self) -> Result<VerifyingKey, TxError> {
-        VerifyingKey::from_bytes(&self.from)
-            .map_err(|err| TxError::InvalidPublicKey(err.to_string()))
+    /// Parses a raw Ed25519 public key in compressed form.
+    fn verify_key(
+        bytes: &[u8; PUBKEY_BYTES],
+    ) -> Result<VerifyingKey, ed25519_dalek::SignatureError> {
+        VerifyingKey::from_bytes(bytes)
     }
 
-    fn check_signature(&self) -> Result<(), CollectError> {
-        self.verify_signature().map_err(CollectError::from)
+    /// Validates the sender public key stored in `from`.
+    fn verify_sender_key(&self) -> Result<VerifyingKey, TxError> {
+        Self::verify_key(&self.from).map_err(|_| TxError::InvalidSenderKey)
     }
 
-    fn check_amount(&self) -> Result<(), CollectError> {
+    /// Validates the transfer recipient key if the transaction is a transfer.
+    fn verify_recipient_key(&self) -> Result<Option<VerifyingKey>, TxError> {
+        if let TxKind::Transfer { to, .. } = self.kind {
+            let key = Self::verify_key(&to).map_err(|_| TxError::InvalidRecipientKey)?;
+            return Ok(Some(key));
+        }
+        Ok(None)
+    }
+
+    /// Ensures the amount moved by the transaction is strictly positive.
+    fn check_amount(&self) -> Result<(), TxError> {
         if self.kind.amount() == Crit::ZERO {
-            return Err(CollectError::EmptyAmount);
+            return Err(TxError::AmountZero);
         }
         Ok(())
     }
 
-    fn check_transfer_rules(&self) -> Result<(), CollectError> {
-        if let TxKind::Transfer { to, .. } = self.kind {
-            VerifyingKey::from_bytes(&to)
-                .map_err(|_| CollectError::Signature(TxError::InvalidTransferRecipient))?;
-            if to == self.from {
-                return Err(CollectError::SelfTransfer);
-            }
+    /// Applies the invariants specific to transfers (recipient key validity and anti self-transfer).
+    fn check_transfer_rules(&self) -> Result<(), TxError> {
+        if let Some(recipient_key) = self.verify_recipient_key()?
+            && recipient_key.to_bytes() == self.from
+        {
+            return Err(TxError::SelfTransfer);
         }
         Ok(())
     }
@@ -177,10 +208,12 @@ impl Tx {
     }
 
     /// Verifies the transaction signature against the embedded public key.
+    ///
+    /// This also re-validates the `from` public key (via [`verify_sender_key`]).
     pub fn verify_signature(&self) -> Result<(), TxError> {
         let signature_bytes = self.signature.ok_or(TxError::MissingSignature)?;
         let signature = Signature::from_bytes(&signature_bytes);
-        let from_key = self.sender_key()?;
+        let from_key = self.verify_sender_key()?;
         let digest = self.signing_digest()?;
         from_key
             .verify(&digest, &signature)
@@ -210,6 +243,7 @@ impl Tx {
         Ok(blake3_hash(&bytes))
     }
 
+    /// Serializes the signable portion of the transaction and hashes it with BLAKE3.
     fn signing_digest(&self) -> Result<[u8; 32], TxError> {
         // Hash the Borsh encoding of the transaction without the signature field.
         let signable = TxSignable {
@@ -235,14 +269,12 @@ struct TxSignable {
 /// Errors returned by [`TransactionCollector`] when filtering incoming transactions.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CollectError {
+    /// The transaction targets a different network than this collector instance.
     #[error("transaction targets unexpected network (expected {expected}, found {found})")]
     WrongNetwork { expected: NetId, found: NetId },
-    #[error("transaction signature rejected")]
-    Signature(#[from] TxError),
-    #[error("transaction amount must be greater than zero")]
-    EmptyAmount,
-    #[error("transfer destination matches sender")]
-    SelfTransfer,
+    /// Stateless validation reported an error (forwarded from [`TxError`]).
+    #[error(transparent)]
+    Tx(#[from] TxError),
 }
 
 /// Utility that gathers valid transactions before handing them to the state layer.
@@ -258,7 +290,9 @@ pub struct TransactionCollector {
 }
 
 impl TransactionCollector {
-    /// Creates a collector that only accepts transactions for `network_id`.
+    /// Creates a collector configured for a specific Crit network.
+    ///
+    /// Any transaction whose `network_id` differs from `network_id` will be rejected.
     pub fn new(network_id: NetId) -> Self {
         Self {
             network_id,
@@ -274,6 +308,9 @@ impl TransactionCollector {
     }
 
     /// Returns the collected transactions without draining them.
+    ///
+    /// The collector does not mutate or clone the transactions; the slice is a direct
+    /// reference to the internal buffer.
     pub fn batch(&self) -> &[Tx] {
         &self.buffer
     }
@@ -304,7 +341,7 @@ impl TransactionCollector {
         Ok(())
     }
 
-    /// Checks that the transaction targets the same network as the collector.
+    /// Validates that the transaction targets the same network as the collector.
     fn check_network(&self, tx: &Tx) -> Result<(), CollectError> {
         if tx.network_id != self.network_id {
             return Err(CollectError::WrongNetwork {
@@ -483,7 +520,7 @@ mod tests {
         tx.from = [0u8; PUBKEY_BYTES];
         assert!(matches!(
             tx.verify_signature(),
-            Err(TxError::InvalidPublicKey(_)) | Err(TxError::InvalidSignature { .. })
+            Err(TxError::InvalidSenderKey) | Err(TxError::InvalidSignature { .. })
         ));
     }
 
@@ -593,6 +630,115 @@ mod tests {
     }
 
     #[test]
+    fn tx_check_stateless_passes_for_valid_transfer() {
+        let (sender, signing_key) = Account::generate_account_keys();
+        let (recipient, _) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            sender,
+            7,
+            TxKind::transfer(&recipient, Crit::from_units(1_000)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        assert!(tx.check_stateless().is_ok());
+    }
+
+    #[test]
+    fn tx_check_stateless_fails_on_missing_signature() {
+        let (account_id, _) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            7,
+            TxKind::stake(Crit::from_units(1_000)),
+        );
+
+        assert!(matches!(
+            tx.check_stateless(),
+            Err(TxError::MissingSignature)
+        ));
+    }
+
+    #[test]
+    fn tx_check_stateless_fails_on_zero_amount() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(MAIN_NET, account_id, 1, TxKind::stake(Crit::ZERO))
+            .sign(&signing_key)
+            .expect("sign");
+
+        assert!(matches!(tx.check_stateless(), Err(TxError::AmountZero)));
+    }
+
+    fn invalid_ed25519_bytes() -> [u8; PUBKEY_BYTES] {
+        for seed in 0u64.. {
+            let mut candidate = [0u8; PUBKEY_BYTES];
+            candidate[..8].copy_from_slice(&seed.to_le_bytes());
+            if VerifyingKey::from_bytes(&candidate).is_err() {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+
+    #[test]
+    fn tx_check_stateless_fails_on_invalid_recipient_key() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let to = invalid_ed25519_bytes();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            3,
+            TxKind::Transfer {
+                to,
+                amount: Crit::from_units(500),
+            },
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        assert!(matches!(
+            tx.check_stateless(),
+            Err(TxError::InvalidRecipientKey)
+        ));
+    }
+
+    #[test]
+    fn tx_check_stateless_fails_on_self_transfer() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            2,
+            TxKind::transfer(&account_id, Crit::from_units(500)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+
+        assert!(matches!(tx.check_stateless(), Err(TxError::SelfTransfer)));
+    }
+
+    #[test]
+    fn tx_check_stateless_fails_on_invalid_signature() {
+        let (account_id, signing_key) = Account::generate_account_keys();
+        let mut tx = Tx::new(
+            MAIN_NET,
+            account_id,
+            9,
+            TxKind::stake(Crit::from_units(500)),
+        )
+        .sign(&signing_key)
+        .expect("sign");
+        tx.signature = Some([0u8; SIGNATURE_BYTES]);
+
+        assert!(matches!(
+            tx.check_stateless(),
+            Err(TxError::InvalidSignature { .. })
+        ));
+    }
+
+    #[test]
     fn collector_rejects_wrong_network() {
         let (account_id, signing_key) = Account::generate_account_keys();
         let tx = Tx::new(
@@ -628,7 +774,7 @@ mod tests {
         let mut collector = TransactionCollector::new(MAIN_NET);
         assert!(matches!(
             collector.push(tx),
-            Err(CollectError::Signature(TxError::MissingSignature))
+            Err(CollectError::Tx(TxError::MissingSignature))
         ));
     }
 
@@ -640,7 +786,10 @@ mod tests {
             .expect("sign");
 
         let mut collector = TransactionCollector::new(MAIN_NET);
-        assert!(matches!(collector.push(tx), Err(CollectError::EmptyAmount)));
+        assert!(matches!(
+            collector.push(tx),
+            Err(CollectError::Tx(TxError::AmountZero))
+        ));
     }
 
     #[test]
@@ -658,7 +807,7 @@ mod tests {
         let mut collector = TransactionCollector::new(MAIN_NET);
         assert!(matches!(
             collector.push(tx),
-            Err(CollectError::SelfTransfer)
+            Err(CollectError::Tx(TxError::SelfTransfer))
         ));
     }
 
@@ -692,7 +841,7 @@ mod tests {
         let mut collector = TransactionCollector::new(MAIN_NET);
         assert!(matches!(
             collector.push(tx),
-            Err(CollectError::Signature(TxError::InvalidTransferRecipient))
+            Err(CollectError::Tx(TxError::InvalidRecipientKey))
         ));
     }
 
