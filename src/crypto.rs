@@ -17,6 +17,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand_core::RngCore;
 use std::path::Path;
 use std::{fs::File, io::Write};
+use zeroize::{Zeroize};
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
@@ -38,12 +39,13 @@ pub fn blake3_hash(input: &[u8]) -> Blake3Hash {
 }
 
 /// Derives a 32-byte encryption key from a passphrase using Argon2 KDF.
-pub fn derive_key_from_passphrase(passphrase: Vec<u8>, salt: &[u8]) -> std::io::Result<[u8; 32]> {
+pub fn derive_key_from_passphrase(mut passphrase: Vec<u8>, salt: &[u8]) -> std::io::Result<[u8; 32]> {
     let mut output_key_material = [0u8; 32];
 
     Argon2::default()
         .hash_password_into(&passphrase, salt, &mut output_key_material)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    passphrase.zeroize(); // Clear passphrase from memory
     Ok(output_key_material)
 }
 
@@ -103,8 +105,7 @@ pub fn read_signing_key_from_file(path: &Path, passphrase: Vec<u8>) -> std::io::
     let nonce = &file_content[SALT_LEN..SALT_LEN + NONCE_LEN];
 
     // Derive encryption key from passphrase and salt
-    let output_key_material = derive_key_from_passphrase(passphrase, &salt)?;
-
+    let output_key_material = derive_key_from_passphrase(passphrase, &salt)?; // Clear
     // Create ChaCha20Poly1305 cipher instance
     let cipher = ChaCha20Poly1305::new(&output_key_material.into());
 

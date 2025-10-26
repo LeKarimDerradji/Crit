@@ -186,6 +186,7 @@ dependencies = [
  "hex",
  "rand_core",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]
