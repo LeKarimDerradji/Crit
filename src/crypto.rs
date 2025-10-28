@@ -24,6 +24,9 @@ use zeroize::Zeroize;
 // Nonce Length for XChaCha20Poly1305
 const NONCE_LEN: usize = 24;
 
+/// Default filename for encrypted signing keys
+pub const SECRET_KEY_FILE: &str = "secret.json";
+
 /// Structure for serializing encrypted secret key to JSON
 #[derive(Serialize, Deserialize)]
 struct SecretFile {
@@ -52,8 +55,7 @@ fn key_from_passphrase(passphrase: &str) -> Key {
 }
 
 /// Encrypts and writes a signing key to a JSON file using XChaCha20Poly1305.
-///
-/// File format: JSON with base64-encoded nonce and ciphertext
+/// File format: JSON with base64-encoded nonce and ciphertext.
 pub fn write_signing_key_to_file(
     signing_key: &SigningKey,
     path: &Path,
